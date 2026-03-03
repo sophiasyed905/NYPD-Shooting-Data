@@ -1,0 +1,287 @@
+--- 
+title: "NYPD Shooting Incident Analysis (2006–2024)"
+author: "Sophia Syed"
+--- 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Introduction 
+
+This report analyzes the NYPD Shooting Incident Data from 2006–2024. The goals are to import and tidy the data set, explore SES, demographic and geographical patterns in all 29675 shootings by borough, sex, age and race, create data visualizations to illustrate the main trends in NY shooting data, fit a generalized linear model for flagging if a shooting correlates with murder, and identify potential sources of bias. All R code is included to increase the amount of reproducibility for all visualizations. 
+
+# Load Packages 
+```{r}
+library(knitr)
+library(tidyverse) 
+library(janitor) 
+library(ggthemes) 
+library(hms) 
+library(dplyr) 
+library(lubridate) 
+library(stringr) 
+``` 
+
+Import and Clean Data 
+```{r}
+shootings_data <- read_csv( "C:/Users/Sophia Syed/OneDrive/Documents/NYPD_Shooting_Incident_Data__Historic_ (1).csv", na = c("", " ", "NA", "Na", "N/A", "null", "Null", "(null)") ) 
+
+shootings <- shootings_data %>% 
+clean_names() %>%
+mutate(across(everything(), as.character)) %>%
+mutate(across(where(is.character), str_trim)) %>% 
+mutate(across(where(is.character), ~na_if(.x, ""))) 
+```
+
+
+Clean Categorical Variables by Replacing NA with UNKNOWN
+```{r}
+shootings <- shootings %>% 
+mutate( p_agegroup = na_if(perp_age_group, "UNKNOWN"),
+p_sex = na_if(perp_sex, "U"), 
+p_race = na_if(perp_race, "UNKNOWN"), 
+v_agegroup = na_if(vic_age_group, "UNKNOWN"), 
+v_sex = na_if(vic_sex, "U"), 
+v_race = na_if(vic_race, "UNKNOWN") ) 
+``` 
+ 
+Convert Coordinate Data and Parse All Datetime Columns
+```{r}
+shootings <- shootings %>% 
+mutate( s_longitude = as.numeric(longitude), s_latitude = as.numeric(latitude), precinct = as.numeric(precinct) ) 
+
+shootings <- shootings %>% 
+mutate( datetime_original = paste(occur_date, occur_time), 
+datetime = parse_date_time( datetime_original, orders = c("mdy HMS", "mdy HM", "mdy IMp", "mdy") ) ) 
+
+```
+
+Victim Age Cleaning and Range Organizing: 
+Victim age is stored in inconsistent formats such as "18-24", "<18"`, and "65+". To analyze age patterns, numeric ages and ordered age buckets are created. 
+
+```{r}
+shootings <- shootings %>% 
+mutate(
+v_age_num = case_when( 
+str_detect(v_agegroup, "^[0-9]+-[0-9]+$") ~ as.numeric(str_extract(v_agegroup, "^[0-9]+")),
+v_agegroup == "<18" ~ 17,
+v_agegroup == "65+" ~ 65, 
+TRUE ~ NA_real_ ) ) 
+
+shootings_bucket <- shootings %>% 
+mutate( v_age_bucket = 
+case_when( v_age_num < 18 ~ "<18",
+between(v_age_num, 18, 24) ~ "18-24", 
+between(v_age_num, 25, 44) ~ "25-44", 
+between(v_age_num, 45, 64) ~ "45-64", 
+v_age_num >= 65 ~ "65+", 
+TRUE ~ NA_character_ ), 
+v_age_bucket = factor( v_age_bucket, levels = c("<18", "18-24", "25-44", "45-64", "65+") ) ) 
+```
+
+Visualization: Victim Age Distribution: 
+Although this data is extremely biased with a large amount of NA values one can see that around 2/3 of the victims are young adult to mid-adulthood aged (18-24/25-44) while it seems rather unlikely due to social and physical reasons, but seniors are the least likely to be victims of a "shooting" crime". This may be due to the fact that seniors may experience crimes under "theft" or "aggravated assault" instead. 
+
+```{r}
+v_age_counts <- shootings_bucket %>% 
+filter(!is.na(v_age_bucket)) %>% 
+count(v_age_bucket) 
+
+ggplot(v_age_counts, aes(x = v_age_bucket, y = n)) + geom_col(fill = "#00868B") + labs( title = "Distribution of Victim Age Groups", x = "Victim Age Group", y = "Number of Victims" ) + theme_minimal(base_size = 10) 
+```
+
+Visualization: Victim Age by Sex and Victim Age by Borough
+Here one can see that Bronx and Brooklyn Have the highest amount of shootings for victims aged 18-25/25-44. Staten Island seems to have the lowest amount of crime, this may be biased since this is predominantly a suburban area with higher SES, even though areas like Manhattan have more wealth, they are more urban and are more likely to be reported on by Police officials and the Media. The data seems extremely biased here as most of the reported victims seem to be male, this may be due to the fact that female based violence may be reported under another category "sexual assault, aggravated assault," while male on male violence would more likely to be under a category like "shooting". 
+
+```{r} 
+victim_age_sex_boro <- shootings_bucket %>% 
+filter(!is.na(v_age_bucket), !is.na(vic_sex), !is.na(boro)) %>% count(boro, v_age_bucket, vic_sex)
+
+ggplot(victim_age_sex_boro, aes(x = v_age_bucket, y = n, fill = vic_sex)) +
+geom_col(position = "dodge") + 
+geom_text( aes(label = n), position = position_dodge(width = 0.9), vjust = -0.1, family = "serif", fontface = "bold.italic", size = 2 ) + 
+facet_wrap(~ boro, ncol = 2) + 
+labs( title = "Victim Age and Sex by Borough (2006–2024)", x = "Victim Age Group", y = "Number of Victims", fill = "Victim Sex" ) +
+theme_minimal(base_size = 12, base_family = "serif") +
+theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+ 
+More Remaining Visualizations: Victim Race seems to be primarily focused around blacks and white/black Hispanics. This may seem rather judgmental but due to racism, cases that occurred with and were perpetrated by minority groups may be more likely to be reported than vice versa. I also decided to include the large amount of NA rows for perpetrator race to illustrate skewness in the data that may also occur from victims failing to report their aggressors race due to social pressures or due to inability to remember the event. Leaving NA rows in the data set also illustrates the asymptotic nature of this data set. 
+
+```{r} 
+chart_colors <- c( "ASIAN / PACIFIC ISLANDER" = "#98F5FF", "BLACK" = "#FFA07A", "BLACK HISPANIC" = "#FF83FA", "WHITE" = "#FFB6C1", "WHITE HISPANIC" = "#98FB98", "UNKNOWN" = "#BDBDBD" )
+shootings %>% 
+count(v_race) %>% 
+ggplot(aes(x = reorder(v_race, n), y = n, fill = v_race)) +
+geom_col(show.legend = TRUE) +
+geom_text(aes(label = n), vjust = -0.2, size = 3, family = "serif", fontface = "bold.italic") + scale_fill_manual(values = chart_colors, name = "Victim Race") + 
+labs( title = "Victim Race Chart (2006-2024)", x = "Victim Race", y = "Victim Count" ) + 
+theme_minimal(base_size = 10, base_family = "serif") + 
+theme( plot.title = element_text(face = "bold.italic", size = 14), 
+axis.text.x = element_text(angle = 75, hjust = 1), legend.position = "bottom" ) 
+``` 
+```{r}
+chart_colors <- c( "ASIAN / PACIFIC ISLANDER" = "#98F5FF", "BLACK" = "#FFA07A", "BLACK HISPANIC" = "#FF83FA", "WHITE" = "#FFB6C1", "WHITE HISPANIC" = "#98FB98", "UNKNOWN" = "#BDBDBD" ) 
+
+shootings %>% 
+count(p_race) %>% 
+ggplot(aes(x = reorder(p_race, n), y = n, fill = p_race)) + 
+geom_col(show.legend = TRUE) + 
+geom_text( aes(label = n), vjust = -0.3, size = 3, family = "serif", fontface = "bold.italic" ) + scale_fill_manual(values = chart_colors, name = "Perpetrator Race", drop = FALSE) + 
+labs( title = "Perpetrator Race Distribution By Race (2006–2024)", x = "Perp Race", y = "Count" ) + theme_minimal(base_size = 10, base_family = "serif") + 
+theme( plot.title = element_text(face = "bold.italic", size = 12), 
+axis.text.x = element_text(angle = 75, hjust = 1), legend.position = "top" ) 
+``` 
+
+
+More Remaining Visualizations: Perp Race when looked at by borough, seems to be primarily focused around blacks and white/black Hispanics. This may seem rather judgmental but due to racism, cases that occurred with and were perpetrated by minority groups may be more likely to be reports. I also decided to include the large amount of NA rows for perpetrator race to illustrate skewness in the data that may also occur from victims failing to report their aggressors race due to social pressures or due to inability to remember the event.
+
+
+
+```{r}
+
+chart_colors <- c( "ASIAN / PACIFIC ISLANDER" = "#98F5FF", "BLACK" = "#FFA07A", "BLACK HISPANIC" = "#FF83FA", "WHITE" = "#FFB6C1", "WHITE HISPANIC" = "#98FB98", "UNKNOWN" = "#BDBDBD" ) 
+borough_labels <- c("BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND") 
+shootings %>% 
+filter(!is.na(p_race), !is.na(boro)) %>% 
+mutate( boro = factor(boro, levels = borough_labels), p_race = factor(p_race, levels = names(chart_colors)) ) %>% 
+count(boro, p_race) %>% 
+ggplot(aes(x = p_race, y = n, fill = p_race)) + 
+geom_col(show.legend = TRUE) + 
+geom_text( aes(label = n), vjust = -0.1, size = 2.2, family = "serif", fontface = "bold.italic" ) + 
+scale_fill_manual(values = chart_colors, name = "Perpetrator Race", drop = TRUE) + 
+facet_wrap(~ boro, ncol = 2) + 
+labs( title = "Perpetrator Race by Borough (2006–2024)", x = "Perp Race", y = "Count" ) +
+theme_minimal(base_size = 8, base_family = "serif") + 
+theme( plot.title = element_text(face = "bold.italic", size = 16), 
+axis.text.x = element_text(angle = 75, hjust = 1.2),legend.position = "bottom" )
+``` 
+
+More Remaining Visualizations: Perp Race when looked at by Sex and Borough, seems to be primarily focused around males in all 5 boroughs. This again may be due to more male on male violence falling under the "shooting" or an "aggravated assault" category with a gun,
+Chart 4: Perp race by sex
+
+```{r}
+chart_colors <- c( "F" = "#98F5FF", "M" = "#FF83FA", "U" = "#FFA07A") 
+shootings %>% 
+filter(!is.na(p_sex), !is.na(boro)) %>%
+mutate( boro = factor(boro, levels = borough_labels), p_race = factor(p_sex, levels = names(chart_colors)) ) %>% 
+count(boro, p_sex) %>% 
+ggplot(aes(x = p_sex, y = n, fill = p_sex)) + 
+geom_col(show.legend = TRUE) + 
+geom_text( aes(label = n), vjust = -0.75, size = 2.2, family = "sans", fontface = "italic" )+
+scale_fill_manual(values = chart_colors,name = "Perpetrator Sex", drop = TRUE) + 
+facet_wrap(~ boro, ncol = 2) + 
+labs( title = "Perpetrator Sex by Borough (2006–2024)", x = "Perp Sex", y = "Count" ) + theme_minimal(base_size = 9, base_family = "serif") + 
+theme( plot.title = element_text(face = "bold.italic", size = 16), 
+axis.text.x = element_text(angle = 75, hjust = 1), legend.position = "bottom" ) 
+```
+
+More Remaining Visualizations: Shooting Trends by boro, seems to show that crime had a sudden spike during Covid in all boroughs other than Staten Island, which seems to have a plateauing crime rate from 2006 to 2024. However, crime has recently gone back to precovid levels after the majority of restrictions were lifted. One can generally say that this data may be biased as shootings may have been more noticed during lockdown and covid period, especially since more individuals were at home and policing was more rife due to lockdown measures where individuals were not allowed out freely (intermixing). Also, one can say that maybe more data is provided by Bronx and Brooklyn boro police reports than the other, creating a noticeable difference in the results.
+
+chart:5 Perp race by sex
+
+```{r}
+
+shootings_year_boro <- shootings %>% 
+mutate(year = year(datetime), boro = str_to_title(boro)) %>% 
+filter(!is.na(year), !is.na(boro), year < 2025) %>% 
+count(boro, year) 
+
+chart_colors <- c( "Bronx" = "#98F5FF", "Brooklyn" = "#FFA07A", "Manhattan" = "#FF83FA", "Queens" = "#FFB6C1", "Staten Island" = "#98FB98", "Unknown" = "#BDBDBD" )
+
+ggplot(shootings_year_boro, aes(x = year, y = n, color = boro)) + 
+geom_line(linewidth = 0.8) + 
+geom_point(size = 2, shape = 15) + 
+scale_color_manual(values = chart_colors) + 
+labs( title = "Shooting Trends by Borough (2006–2024)", x = "Year", y = "Incident Count", color = "Borough" ) + 
+theme_minimal(base_size = 11) + 
+theme(plot.title = element_text(face = "bold.italic", size = 15))
+```
+
+Chart 6 and 7: Race and Sex Heat maps show off the severely biased nature of the data. As there are hardly any American Indians and Asians within the dataset compared to Hispanics and Blacks, alongside the large amounts of unknown reports, one is left with blank, unrepresented tiles within the matrix
+However, one can see that Black and Hispanic Races, seem to have high correlation of conflict 
+Between the victim and their perpetrator. This again could be due to the skewed population of the data, with black victims and perpetrators having their highest correlation between each other. While in the sex heatmap chart, the data is extremely unbiased due to the lack of female perpetrators and victims, again making it seem like male to male shooting violence is rife, while male to female, female to female shootings are more uncommon. Though Male perpetrators with female victims, and unknown perpetrators were somewhat common, but the data output seemed rather biased due to the one-sidedness and heavy bias of the data. 
+
+```{r}
+
+race_matrix <- shootings %>% 
+mutate( p_race = perp_race, v_race = vic_race ) %>% 
+filter(!is.na(p_race), !is.na(v_race)) %>% 
+count(v_race, p_race) 
+
+ggplot(race_matrix, aes(x = p_race, y = v_race, fill = n)) + geom_tile(color = "grey") + 
+scale_fill_viridis_c(option = "D") + 
+labs(title = "Victim Race vs. Perpetrator Race", x = "Perpetrator Race", y = "Victim Race") + theme_minimal(base_size = 10) 
+
+```
+Sex matrix heatmap
+```{r} 
+sex_matrix <- shootings %>% 
+mutate( p_sex = perp_sex, v_sex = vic_sex ) %>% 
+filter(!is.na(p_sex), !is.na(v_sex)) %>% 
+count(v_sex, p_sex) 
+
+ggplot(sex_matrix, aes(x = p_sex, y = v_sex, fill = n)) + geom_tile(color = "violet") + scale_fill_viridis_c(option = "B") + labs(title = "Victim Sex vs. Perpetrator Sex", x = "Perpetrator Sex", y = "Victim Sex") + theme_minimal(base_size = 15) 
+```
+Chart 8: Plotting the top 5 precincts for shooting count per borough. One can see the high amounts of shootings in Brooklyn and Bronx, with Queens and Manhattan following close behind. However, apart from precinct 120 in Staten Island, the number of shootings there remains very low, perhaps due to biased amounts of reported data for that borough, compared to the 4 others. 
+```{r}
+
+shootings_precinct_boro <- shootings %>% 
+  mutate( boro = str_to_title(boro), precinct = as.factor(precinct) ) %>%
+  filter(!is.na(boro), !is.na(precinct)) %>% 
+  count(boro, precinct) 
+
+top5_precincts <- shootings_precinct_boro %>% 
+group_by(boro) %>% 
+slice_max(order_by = n, n = 5) %>% ungroup()
+
+ggplot(top5_precincts, aes(x = reorder(precinct, n), y = n)) + 
+geom_col(fill = "grey", width = 0.6) + 
+coord_flip() + 
+facet_wrap(~ boro, scales = "free_y") + 
+labs( title = "Top 5 Precincts by Shooting Incidents (2006–2024)", x = "Precinct", y = "Number of Shootings" ) + theme_classic (base_size = 10) + theme( plot.title = element_text(face = "italic", size = 15), plot.subtitle = element_text(size = 12), axis.text.y = element_text(size = 10), panel.grid.minor = element_blank() )
+```
+Chart 9: Plotting the shootings by time of day. One can see the the highest amount of shootings occur in Bronx and Brooklyn between the hours of 9pm to 3am, with a large number of shootings also occurring between 6 to 9pm in all boroughs except Staten Island. Again, this is due to lack of reporting bias for this Borough, as seen in previous plots
+
+```{r} 
+shootings_times <- shootings %>% 
+  mutate( hour = hour(datetime), 
+          time_group = case_when( hour >= 3 & hour < 6 ~ "Early Morning", 
+                                  hour >= 6 & hour < 12 ~ "Morning", 
+                                  hour >= 12 & hour < 15 ~ "Early Afternoon", 
+                                  hour >= 15 & hour < 18 ~ "Late Afternoon", 
+                                  hour >= 18 & hour < 21 ~ "Early Evening", 
+                                  TRUE ~ "Late Night" ) ) %>% 
+                                  filter(!is.na(boro)) %>% 
+                                  count(boro, time_group)
+
+ggplot(shootings_times, aes(x = time_group, y = n)) +
+  geom_col(fill = "#EE5C42") + 
+  facet_wrap(~ boro, ncol = 1) + 
+  labs( title = "Shootings by Time of Day, Divided by Borough (2006–2024)", x = "Time of Day", y = "Number of Incidents" ) + 
+  theme_minimal(base_size = 10) + 
+  theme( axis.text.x = element_text(angle = 75, hjust = 1), plot.title = element_text(face = "bold", size = 14) )
+```
+A multifaceted logistic regression model was used to examine whether victim sex and borough were associated with the likelihood of a shooting being fatal (fatal being marked with 1 or True with murder flag and 0 or False murder flag being a non fatal shooting). Victim Sex (M) was not a significant predictor of fatality (p = 0.246), indicating that male and female victims do not have a statistically significant chance of being a fatal or non fatal victim. Borough was surprisingly also not a strong predictor; Brooklyn, Queens, and Staten Island did not differ significantly from the Bronx, with high P values of over 0.25. Manhattan showed a slightly lower fatality probability than the Bronx with a p value of 0.05, which signifies a medium positive correlation with fatality and location. Overall, the model suggests that neither sex nor borough meaningfully predicts whether a shooting results in death.
+
+```{r}
+shootings_simple <- shootings %>% 
+mutate( murder = if_else(statistical_murder_flag == "TRUE", 1, 0), 
+v_sex = factor(v_sex, levels = c("F", "M")), boro = factor(boro) ) 
+simple_model <- glm( murder ~ v_sex + boro,
+                     data = shootings_simple, 
+                     family = binomial ) 
+summary(simple_model)
+```
+
+Bias and Limitations: The dataset contains several sources of bias: 
+Reporting bias: only shootings that are formally reported to the NYPD are included in this list, it can be estimated that a large number are never fully counted as an official shooting incident
+Policing bias: boroughs with heavier policing show more recorded incidents, in this case it would be Bronx/Brooklyn/Manhattan and Queens
+Demographic misclassification: race/sex/age recorded by officers may be rather skewed since people may misidentify as a certain race, sex or age group
+Missing data: many perpetrator attributes are “UNKNOWN” due to that field being incomplete
+Analytical bias: model omits SES, qualitative notes about the shooting and various neighborhood demographic factors 
+
+Conclusion: 
+This analysis highlights demographic and geographic disparities in NYPD shootings from 2006–2024. The visualizations show strong borough-level differences and biased racial disparities, especially between Blacks and Hispanics, with male vs male crime being rife in all 5 boroughs and their precincts. The logistic regression model identifies associations between victim characteristics and fatal outcomes, though it does not show any significance between a boro and experiencing a fatal shooting. Bias and missing data limit the true nature of this model, but one can see that crime is dependent on race and sex, as well as the boroughs and their precincts. 
